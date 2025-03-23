@@ -1,18 +1,18 @@
-import pickle
+import xgboost as xgb
 import numpy as np
 from fastapi import FastAPI
 from pydantic import BaseModel
+import joblib
 
-# ✅ Load the trained XGBoost model
-with open("xgboost_fraud_model.pkl", "rb") as model_file:
-    model = pickle.load(model_file)
+# ✅ Initialize FastAPI app
+app = FastAPI()
+
+# ✅ Load the trained XGBoost model from JSON
+model = xgb.Booster()
+model.load_model("updated_xgb_model.json")  # Load model from JSON file
 
 # ✅ Load the scaler
-with open("scaler.pkl", "rb") as scaler_file:
-    scaler = pickle.load(scaler_file)
-
-# ✅ FastAPI App
-app = FastAPI()
+scaler = joblib.load("scaler.pkl")  # Using joblib to load the scaler
 
 # ✅ Define Input Schema using Pydantic
 class TransactionInput(BaseModel):
@@ -23,19 +23,32 @@ class TransactionInput(BaseModel):
 
 @app.post("/predict/")
 def predict_fraud(data: TransactionInput):
-    """ Predict fraud using the trained XGBoost model """
+    """ Predict fraud using the trained XGBoost model in JSON format """
 
-    # ✅ Scale transaction_amount
-    scaled_amount = scaler.transform(np.array([[data.transaction_amount]]))  # Ensure 2D array
+    try:
+        # ✅ Rename fields to match model expectations
+        features_dict = {
+            "payer_email_anonymous": hash(data.payer_email) % (10**6),
+            "payee_id_anonymous": hash(data.payee_ip) % (10**6),
+            "transaction_amount": data.transaction_amount
+        }
 
-    # ✅ Prepare input features (assuming model expects these three)
-    features = np.array([
-        scaled_amount[0, 0],  # Extract single value after scaling
-        hash(data.payer_email) % (10**6),  # Convert email to numeric hash
-        hash(data.payee_ip) % (10**6)  # Convert IP to numeric hash
-    ]).reshape(1, -1)
+        # ✅ Convert dictionary to XGBoost DMatrix
+        dmatrix = xgb.DMatrix(np.array([[
+                                         features_dict["payer_email_anonymous"],
+                                         features_dict["payee_id_anonymous"],features_dict["transaction_amount"],]]),
+                              feature_names=["payer_email_anonymous", "payee_id_anonymous","transaction_amount",])
 
-    # ✅ Predict fraud
-    is_fraud = int(model.predict(features)[0])  # Convert NumPy type to native Python int
+        # ✅ Predict fraud
+        fraud_probability = model.predict(dmatrix)[0]
 
-    return {"transaction_id": data.transaction_id, "is_fraud": is_fraud}
+        # ✅ Convert probability to binary fraud prediction
+        is_fraud = int(fraud_probability > 0.5)
+
+        return {
+            "transaction_id": data.transaction_id,
+            "is_fraud": is_fraud
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
